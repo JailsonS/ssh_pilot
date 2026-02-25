@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trase Map - Supply Chain</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+
+    <style>
+        :root {
+            --trase-dark: #1a1a1a;
+            --panel-bg: rgba(30, 30, 30, 0.95);
+            --color-train: #9b59b6; 
+            --color-port: #e74c3c;  
+            --color-proc: #f39c12;  
+            --color-silo: #3498db;  
+        }
+
+        body { margin: 0; padding: 0; font-family: 'Lato', sans-serif; background-color: var(--trase-dark); color: white; }
+        #map { height: 100vh; width: 100%; z-index: 1; background: #111; }
+        
+        #sidebar {
+            position: absolute; top: 20px; left: 20px; width: 340px;
+            background: var(--panel-bg); padding: 25px; border-radius: 4px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5); z-index: 1000;
+            border-left: 4px solid #F9B624;
+            max-height: 90vh; overflow-y: auto; backdrop-filter: blur(5px);
+        }
+        
+        h1 { margin-top: 0; font-size: 22px; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #444; padding-bottom: 15px; }
+        
+        .control-group { margin-top: 20px; }
+        label { display: block; font-size: 11px; text-transform: uppercase; font-weight: 700; color: #aaa; margin-bottom: 6px; }
+        
+        /* Select2 Dark */
+        .select2-container--default .select2-selection--single { background-color: #333; border: 1px solid #555; height: 38px; color: white; }
+        .select2-container--default .select2-selection--single .select2-selection__rendered { color: white; line-height: 36px; }
+        .select2-dropdown { background-color: #333; color: white; border: 1px solid #555; }
+
+        button { width: 100%; padding: 12px; background-color: #008985; color: white; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; margin-top: 20px; }
+        
+        #loader {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 9999;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+        .spinner { width: 50px; height: 50px; border: 5px solid #333; border-top: 5px solid #F9B624; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        .hidden { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }
+
+        .legend-item { display: flex; align-items: center; margin-bottom: 8px; font-size: 13px; color: #eee; }
+        .dot { width: 12px; height: 12px; margin-right: 10px; display: inline-block; border: 1px solid rgba(255,255,255,0.3); }
+        .line-legend { width: 20px; height: 4px; margin-right: 10px; display: inline-block; }
+    </style>
+</head>
+<body>
+
+    <div id="loader"> <div class="spinner"></div>
+        <div id="loader-text" style="margin-top:10px;">Loading Network Data...</div>
+    </div>
+    <div id="sidebar">
+        <h1>Supply <span>Chain</span></h1>
+        
+        <div class="control-group">
+            <label>1. PRODUCT</label>
+            <select id="filterProduct" style="width:100%"><option value="ALL">All Products</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>2. EXPORTER</label>
+            <select id="filterExporter" style="width:100%"><option value="ALL">All Exporters</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>3. FACILITY / NODE</label>
+            <select id="filterNode" style="width:100%"><option value="ALL">All Network</option></select>
+        </div>
+
+        <button onclick="applyFilters()">Apply Filters</button>
+        
+        <div id="stats" style="margin-top:20px">
+            <div>Segments drawn: <span id="routeCount" style="color:#F9B624; font-weight:bold">0</span></div>
+        </div>
+
+        <div style="margin-top:20px; border-top: 1px solid #444; padding-top:15px">
+            <label>LEGEND (Production intensity)</label>
+            <div id="choroplethLegend" style="height: 10px; background: linear-gradient(to right, #edf8e9, #006d2c); margin-bottom: 5px;"></div>
+            <div style="display:flex; justify-content: space-between; font-size:10px"><span>Low Vol</span><span>High Vol</span></div>
+        </div>
+
+        <div class="legend-section" style="margin-top: 20px; border-top: 1px solid #444; padding-top: 15px;">
+            <div class="legend-title" style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #aaa; margin-bottom: 10px;">Products</div>
+            <div id="productLegendContainer"></div>
+        </div>
+
+        <div class="legend-section" style="margin-top: 20px; border-top: 1px solid #444; padding-top: 15px;">
+            <div class="legend-title" style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #aaa; margin-bottom: 10px;">Facility Types</div>
+            <div class="legend-item"><span class="dot" style="background:var(--color-silo); border-radius:50%;"></span> HUB / SILO</div>
+            <div class="legend-item"><span class="dot" style="background:var(--color-train); border-radius:50%;"></span> TRAIN TERMINAL</div>
+            <div class="legend-item"><span class="dot" style="background:var(--color-proc); border-radius:50%;"></span> PROCESSING / INDUSTRY</div>
+            <div class="legend-item"><span class="dot" style="background:var(--color-port); border-radius:50%;"></span> PORT</div>
+            <div class="legend-item"><span class="dot" style="background:#95a5a6; border-radius:50%;"></span> OTHER FACILITIES</div>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylinedecorator.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    
+    <script>
+        const CSV_URL = "supply_shed_flows_v3.csv"; 
+        
+        // Paleta de Cores Dinâmicas para Produtos
+        const PRODUCT_COLORS = ['#F9B624', '#00b894', '#0984e3', '#d63031', '#6c5ce7', '#e84393', '#00cec9', '#fdcb6e'];
+        let productColorMap = {};
+        
+        const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([-15.79, -47.88], 4);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: '&copy; CARTO' }).addTo(map);
+
+        let municipalityLayer = L.layerGroup().addTo(map);
+        let flowLayer = L.layerGroup().addTo(map);
+        let pointLayer = L.layerGroup().addTo(map); 
+        
+        let municipalityShapes = {}; 
+        let geoIndex = {}, ibgeNameMap = {};
+        
+        // NOVA ESTRUTURA: Guardamos a rota inteira em vez de quebrar no início
+        let pathsData = []; 
+
+        function extractIBGE(fullId) {
+            if (!fullId || fullId === 'MERCADO_EXTERNO') return null;
+            const parts = fullId.split('-BR-');
+            return parts.length > 1 ? parts[1] : null;
+        }
+
+        function isProductionNode(nodeId) {
+            if (!nodeId) return false;
+            return nodeId.toUpperCase().includes('PRODUCTION') || nodeId.toUpperCase().includes('PROD');
+        }
+
+        function formatNodeLabel(nodeId) {
+            if (nodeId === 'MERCADO_EXTERNO') return 'EXTERNAL MARKET';
+            const ibge = extractIBGE(nodeId);
+            const cityName = ibgeNameMap[ibge]; 
+            const type = nodeId.split('-BR-')[0];
+            return cityName ? `${type} - ${cityName}` : nodeId;
+        }
+
+        function getNodeColor(nodeId) {
+            const idUpper = nodeId.toUpperCase();
+            if (idUpper.includes('TRAIN')) return '#9b59b6'; 
+            if (idUpper.includes('PORT')) return '#e74c3c'; 
+            if (idUpper.includes('PROC')) return '#f39c12'; 
+            if (idUpper.includes('HUB') || idUpper.includes('SILO')) return '#3498db'; 
+            return '#95a5a6';
+        }
+
+        // Modificamos a função para permitir um offset, assim se houver soja e milho na mesma rota, as linhas não ficam 100% sobrepostas
+        function getBezierPoints(start, end, curvature = 0.2, offsetMultiplier = 0) {
+            var midLat = (start.lat + end.lat) / 2, midLng = (start.lng + end.lng) / 2;
+            var distLat = end.lat - start.lat, distLng = end.lng - start.lng;
+            // O offset altera levemente a curvatura baseada no produto
+            var customCurvature = curvature + (offsetMultiplier * 0.08); 
+            var controlLat = midLat - (distLng * customCurvature), controlLng = midLng + (distLat * customCurvature);
+            var points = [];
+            for (var t = 0; t <= 1; t += 0.05) {
+                points.push([
+                    (1 - t) * (1 - t) * start.lat + 2 * (1 - t) * t * controlLat + t * t * end.lat,
+                    (1 - t) * (1 - t) * start.lng + 2 * (1 - t) * t * controlLng + t * t * end.lng
+                ]);
+            }
+            return points;
+        }
+
+        async function loadData() {
+            try {
+                const geoResponse = await fetch('https://raw.githubusercontent.com/tbrugz/geodata-br/master/geojson/geojs-100-mun.json');
+                const rawGeoData = await geoResponse.json();
+                
+                L.geoJSON(rawGeoData, {
+                    style: { fillColor: 'rgba(255,255,255,0.05)', weight: 0.2, color: '#444', fillOpacity: 0.1 },
+                    onEachFeature: (feature, layer) => {
+                        const ibge = String(feature.properties.id);
+                        municipalityShapes[ibge] = layer;
+                        ibgeNameMap[ibge] = feature.properties.name;
+                        geoIndex[ibge] = feature;
+                    }
+                }).addTo(municipalityLayer);
+
+                const rawCsv = await d3.dsv(";", CSV_URL);
+                pathsData = [];
+                let uniqueNodes = new Set(), uniqueProducts = new Set(), uniqueExporters = new Set();
+                
+                rawCsv.forEach(d => {
+                    const product = (d.Product || "").trim();
+                    const exporter = (d.Exporter || "").trim();
+                    const volume = parseFloat((d.Allocated_Volume || "0").replace(',', '.'));
+
+                    if (volume > 0) {
+                        const steps = [d.Step_1, d.Step_2, d.Step_3, d.Step_4, d.Step_5, d.Step_6]
+                                      .filter(s => s && s.trim() !== "");
+                        
+                        // Guardamos a rota completa
+                        pathsData.push({ steps, product, exporter, volume });
+
+                        uniqueProducts.add(product);
+                        if (exporter) uniqueExporters.add(exporter);
+                        steps.forEach(s => uniqueNodes.add(s));
+                    }
+                });
+
+                // Mapeia Cores e Constrói Legenda de Produtos
+                const pSel = document.getElementById('filterProduct');
+                let pIdx = 0;
+                const legendContainer = document.getElementById('productLegendContainer');
+                
+                [...uniqueProducts].sort().forEach(p => { 
+                    pSel.options.add(new Option(p, p)); 
+                    // Atribui cor
+                    productColorMap[p] = PRODUCT_COLORS[pIdx % PRODUCT_COLORS.length];
+                    pIdx++;
+                    
+                    // Adiciona na legenda
+                    legendContainer.innerHTML += `
+                        <div class="legend-item">
+                            <span class="line-legend" style="background:${productColorMap[p]};"></span> ${p}
+                        </div>`;
+                });
+
+                const eSel = document.getElementById('filterExporter');
+                [...uniqueExporters].sort().forEach(v => { eSel.options.add(new Option(v, v)); });
+
+                const nSel = document.getElementById('filterNode');
+                [...uniqueNodes].sort().forEach(n => { nSel.options.add(new Option(formatNodeLabel(n), n)); });
+
+                $('#filterNode, #filterExporter').select2();
+                
+                applyFilters();
+                document.getElementById('loader').classList.add('hidden');
+
+            } catch (err) { 
+                console.error("Erro fatal:", err);
+                document.getElementById('loader-text').innerText = "Error: Check Console.";
+            }
+        }
+
+        function applyFilters() {
+            flowLayer.clearLayers();
+            pointLayer.clearLayers();
+
+            const fProd = document.getElementById('filterProduct').value;
+            const fNode = document.getElementById('filterNode').value;
+            const fExp = document.getElementById('filterExporter').value; 
+            
+            // 1. FILTRAR AS ROTAS COMPLETAS (Em vez de buscar "upstream", filtramos direto os caminhos)
+            let activePaths = pathsData;
+
+            if (fProd !== 'ALL') activePaths = activePaths.filter(p => p.product === fProd);
+            // Aqui a grande mudança: se filtrou exportador, traz a bacia exata que a empresa operou
+            if (fExp !== 'ALL') activePaths = activePaths.filter(p => p.exporter === fExp);
+            if (fNode !== 'ALL') activePaths = activePaths.filter(p => p.steps.includes(fNode));
+
+            // 2. CONSTRUIR OS SEGMENTOS AGREGADOS DESSAS ROTAS
+            let aggregatedFlows = new Map();
+            const volByMun = {};
+
+            activePaths.forEach(path => {
+                // Agregar volume para o Choropleth (Somente a origem da rota)
+                if (path.steps.length > 0 && isProductionNode(path.steps[0])) {
+                    const ibge = extractIBGE(path.steps[0]);
+                    volByMun[ibge] = (volByMun[ibge] || 0) + path.volume;
+                }
+
+                // Transformar Rota em Segmentos
+                for (let i = 0; i < path.steps.length - 1; i++) {
+                    let orig = path.steps[i];
+                    let dest = path.steps[i+1];
+                    let prod = path.product;
+                    
+                    // Agrupamos por Origem + Destino + Produto (para desenhar uma linha por produto)
+                    let key = `${orig}|${dest}|${prod}`;
+                    
+                    if (!aggregatedFlows.has(key)) {
+                        aggregatedFlows.set(key, { Origin_ID: orig, Destination_ID: dest, Product: prod, Volume_Tons: 0 });
+                    }
+                    aggregatedFlows.get(key).Volume_Tons += path.volume;
+                }
+            });
+
+            const visibleFlows = Array.from(aggregatedFlows.values());
+
+            // 3. ATUALIZAR MUNICÍPIOS (CHOROPLETH)
+            const volumes = Object.values(volByMun);
+            const maxVol = volumes.length > 0 ? Math.max(...volumes) : 1;
+
+            Object.keys(municipalityShapes).forEach(ibge => {
+                const layer = municipalityShapes[ibge];
+                const vol = volByMun[ibge] || 0;
+                
+                if (vol > 0) {
+                    layer.setStyle({ fillColor: d3.interpolateGreens(vol / maxVol), fillOpacity: 0.8, weight: 0.5, color: '#fff' });
+                    layer.bindPopup(`<b>${ibgeNameMap[ibge]}</b><br>Volume filtrado: ${vol.toLocaleString()} t`);
+                } else {
+                    layer.setStyle({ fillColor: 'rgba(255,255,255,0.05)', fillOpacity: 0.1, weight: 0.2, color: '#444' });
+                    layer.unbindPopup();
+                }
+            });
+
+            // 4. RENDERIZAR PONTOS E LINHAS
+            let drawnPoints = new Set();
+            // Pega o maior volume de segmento para calcular a espessura relativa
+            const maxSegmentVol = visibleFlows.length > 0 ? d3.max(visibleFlows, d => d.Volume_Tons) : 1;
+
+            // Criar um índice fixo para os produtos para aplicar o offset nas curvas
+            const productNames = Object.keys(productColorMap);
+
+            visibleFlows.forEach(d => {
+                const origCode = extractIBGE(d.Origin_ID);
+                const destCode = extractIBGE(d.Destination_ID);
+
+                // Pontos
+                [d.Origin_ID, d.Destination_ID].forEach(id => {
+                    if (isProductionNode(id) || id === 'MERCADO_EXTERNO' || drawnPoints.has(id)) return;
+                    const code = extractIBGE(id);
+                    if (geoIndex[code]) {
+                        const center = d3.geoCentroid(geoIndex[code]).reverse();
+                        L.circleMarker(center, {
+                            radius: id.includes('PORT') ? 7 : 4,
+                            fillColor: getNodeColor(id), color: '#fff', weight: 1, fillOpacity: 1
+                        }).addTo(pointLayer).bindPopup(formatNodeLabel(id));
+                        drawnPoints.add(id);
+                    }
+                });
+
+                // Linhas
+                if (geoIndex[origCode]) {
+                    const startArr = d3.geoCentroid(geoIndex[origCode]).reverse();
+                    let endArr;
+                    
+                    if (d.Destination_ID === 'MERCADO_EXTERNO') { endArr = [startArr[0] - 2, startArr[1] + 4]; } 
+                    else if (geoIndex[destCode]) { endArr = d3.geoCentroid(geoIndex[destCode]).reverse(); }
+
+                    if (startArr && endArr) {
+                        const productIndex = productNames.indexOf(d.Product);
+                        // Chama a curva passando o offset do produto, evita linhas de produtos diferentes sumirem uma embaixo da outra
+                        const pts = getBezierPoints(
+                            {lat: startArr[0], lng: startArr[1]}, 
+                            {lat: endArr[0], lng: endArr[1]}, 
+                            0.2, 
+                            productIndex
+                        );
+                        
+                        const weight = Math.min(Math.max((d.Volume_Tons / maxSegmentVol) * 15, 1.5), 8);
+                        const lineColor = productColorMap[d.Product];
+
+                        const polyline = L.polyline(pts, { 
+                            color: lineColor, 
+                            weight: weight, 
+                            opacity: 0.6, 
+                            smoothFactor: 1,
+                            interactive: false
+                        }).addTo(flowLayer);
+
+                        const arrowSize = 6 + (weight / 2.5);
+                        const arrowHeadSymbol = L.Symbol.arrowHead({
+                            pixelSize: arrowSize,
+                            polygon: true,
+                            pathOptions: { stroke: false, fillOpacity: 0.8, color: lineColor }
+                        });
+
+                        L.polylineDecorator(polyline, {
+                            patterns: [{ offset: '85%', repeat: 0, symbol: arrowHeadSymbol }]
+                        }).addTo(flowLayer);
+                    }
+                }
+            });
+
+            document.getElementById('routeCount').innerText = visibleFlows.length;
+        }
+        
+        loadData();
+    </script>
+</body>
+</html>
