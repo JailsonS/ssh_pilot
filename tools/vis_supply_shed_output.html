@@ -71,8 +71,8 @@
         </div>
 
         <div class="control-group">
-            <label>2. EXPORTER</label>
-            <select id="filterExporter" style="width:100%"><option value="ALL">All Exporters</option></select>
+            <label>2. TYPE</label>
+            <select id="filterType" style="width:100%"><option value="ALL">All Types</option></select>
         </div>
 
         <div class="control-group">
@@ -116,7 +116,7 @@
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     
     <script>
-        const CSV_URL = "supply_shed_flows_v3.csv"; 
+        const CSV_URL = "supply_shed_flows_out.csv"; 
         
         // Paleta de Cores Dinâmicas para Produtos
         const PRODUCT_COLORS = ['#F9B624', '#00b894', '#0984e3', '#d63031', '#6c5ce7', '#e84393', '#00cec9', '#fdcb6e'];
@@ -132,26 +132,25 @@
         let municipalityShapes = {}; 
         let geoIndex = {}, ibgeNameMap = {};
         
-        // NOVA ESTRUTURA: Guardamos a rota inteira em vez de quebrar no início
         let pathsData = []; 
 
         function extractIBGE(fullId) {
             if (!fullId || fullId === 'MERCADO_EXTERNO') return null;
-            const parts = fullId.split('-BR-');
+            const parts = fullId.split(/_BR_|-BR-/);
             return parts.length > 1 ? parts[1] : null;
-        }
-
-        function isProductionNode(nodeId) {
-            if (!nodeId) return false;
-            return nodeId.toUpperCase().includes('PRODUCTION') || nodeId.toUpperCase().includes('PROD');
         }
 
         function formatNodeLabel(nodeId) {
             if (nodeId === 'MERCADO_EXTERNO') return 'EXTERNAL MARKET';
             const ibge = extractIBGE(nodeId);
             const cityName = ibgeNameMap[ibge]; 
-            const type = nodeId.split('-BR-')[0];
+            const type = nodeId.split(/_BR_|-BR-/)[0].replace(/_/g, ' '); 
             return cityName ? `${type} - ${cityName}` : nodeId;
+        }
+
+        function isProductionNode(nodeId) {
+            if (!nodeId) return false;
+            return nodeId.toUpperCase().includes('PRODUCTION') || nodeId.toUpperCase().includes('PROD');
         }
 
         function getNodeColor(nodeId) {
@@ -163,11 +162,9 @@
             return '#95a5a6';
         }
 
-        // Modificamos a função para permitir um offset, assim se houver soja e milho na mesma rota, as linhas não ficam 100% sobrepostas
         function getBezierPoints(start, end, curvature = 0.2, offsetMultiplier = 0) {
             var midLat = (start.lat + end.lat) / 2, midLng = (start.lng + end.lng) / 2;
             var distLat = end.lat - start.lat, distLng = end.lng - start.lng;
-            // O offset altera levemente a curvatura baseada no produto
             var customCurvature = curvature + (offsetMultiplier * 0.08); 
             var controlLat = midLat - (distLng * customCurvature), controlLng = midLng + (distLat * customCurvature);
             var points = [];
@@ -197,51 +194,49 @@
 
                 const rawCsv = await d3.dsv(";", CSV_URL);
                 pathsData = [];
-                let uniqueNodes = new Set(), uniqueProducts = new Set(), uniqueExporters = new Set();
+                let uniqueNodes = new Set(), uniqueProducts = new Set(), uniqueTypes = new Set();
                 
                 rawCsv.forEach(d => {
-                    const product = (d.Product || "").trim();
-                    const exporter = (d.Exporter || "").trim();
-                    const volume = parseFloat((d.Allocated_Volume || "0").replace(',', '.'));
+                    const product = (d.product || "").trim();
+                    const type = (d.type || "").trim();
+                    const volume = parseFloat((d.volume || "0").replace(',', '.'));
 
                     if (volume > 0) {
-                        const steps = [d.Step_1, d.Step_2, d.Step_3, d.Step_4, d.Step_5, d.Step_6]
+                        const steps = [d.step_1, d.step_2, d.step_3, d.step_4, d.step_5]
                                       .filter(s => s && s.trim() !== "");
                         
-                        // Guardamos a rota completa
-                        pathsData.push({ steps, product, exporter, volume });
+                        pathsData.push({ steps, product, type, volume });
 
-                        uniqueProducts.add(product);
-                        if (exporter) uniqueExporters.add(exporter);
+                        if (product) uniqueProducts.add(product);
+                        if (type) uniqueTypes.add(type);
                         steps.forEach(s => uniqueNodes.add(s));
                     }
                 });
 
-                // Mapeia Cores e Constrói Legenda de Produtos
+                // Produtos
                 const pSel = document.getElementById('filterProduct');
                 let pIdx = 0;
                 const legendContainer = document.getElementById('productLegendContainer');
-                
                 [...uniqueProducts].sort().forEach(p => { 
                     pSel.options.add(new Option(p, p)); 
-                    // Atribui cor
                     productColorMap[p] = PRODUCT_COLORS[pIdx % PRODUCT_COLORS.length];
                     pIdx++;
-                    
-                    // Adiciona na legenda
                     legendContainer.innerHTML += `
                         <div class="legend-item">
                             <span class="line-legend" style="background:${productColorMap[p]};"></span> ${p}
                         </div>`;
                 });
 
-                const eSel = document.getElementById('filterExporter');
-                [...uniqueExporters].sort().forEach(v => { eSel.options.add(new Option(v, v)); });
+                // Types
+                const tSel = document.getElementById('filterType');
+                [...uniqueTypes].sort().forEach(t => { tSel.options.add(new Option(t, t)); });
 
+                // Nodes
                 const nSel = document.getElementById('filterNode');
                 [...uniqueNodes].sort().forEach(n => { nSel.options.add(new Option(formatNodeLabel(n), n)); });
 
-                $('#filterNode, #filterExporter').select2();
+                // Inicializar Select2
+                $('#filterProduct, #filterType, #filterNode').select2();
                 
                 applyFilters();
                 document.getElementById('loader').classList.add('hidden');
@@ -257,35 +252,44 @@
             pointLayer.clearLayers();
 
             const fProd = document.getElementById('filterProduct').value;
+            const fType = document.getElementById('filterType').value;
             const fNode = document.getElementById('filterNode').value;
-            const fExp = document.getElementById('filterExporter').value; 
             
-            // 1. FILTRAR AS ROTAS COMPLETAS (Em vez de buscar "upstream", filtramos direto os caminhos)
             let activePaths = pathsData;
 
+            // Aplicação dos filtros básicos
             if (fProd !== 'ALL') activePaths = activePaths.filter(p => p.product === fProd);
-            // Aqui a grande mudança: se filtrou exportador, traz a bacia exata que a empresa operou
-            if (fExp !== 'ALL') activePaths = activePaths.filter(p => p.exporter === fExp);
-            if (fNode !== 'ALL') activePaths = activePaths.filter(p => p.steps.includes(fNode));
+            if (fType !== 'ALL') activePaths = activePaths.filter(p => p.type === fType);
+            
+            // Filtro de Node (Facility)
+            if (fNode !== 'ALL') {
+                let truncatedPaths = [];
+                activePaths.forEach(p => {
+                    const nodeIndex = p.steps.indexOf(fNode);
+                    if (nodeIndex !== -1) {
+                        truncatedPaths.push({
+                            ...p,
+                            steps: p.steps.slice(0, nodeIndex + 1)
+                        });
+                    }
+                });
+                activePaths = truncatedPaths; 
+            }
 
-            // 2. CONSTRUIR OS SEGMENTOS AGREGADOS DESSAS ROTAS
             let aggregatedFlows = new Map();
             const volByMun = {};
 
             activePaths.forEach(path => {
-                // Agregar volume para o Choropleth (Somente a origem da rota)
                 if (path.steps.length > 0 && isProductionNode(path.steps[0])) {
                     const ibge = extractIBGE(path.steps[0]);
                     volByMun[ibge] = (volByMun[ibge] || 0) + path.volume;
                 }
 
-                // Transformar Rota em Segmentos
                 for (let i = 0; i < path.steps.length - 1; i++) {
                     let orig = path.steps[i];
                     let dest = path.steps[i+1];
                     let prod = path.product;
                     
-                    // Agrupamos por Origem + Destino + Produto (para desenhar uma linha por produto)
                     let key = `${orig}|${dest}|${prod}`;
                     
                     if (!aggregatedFlows.has(key)) {
@@ -297,7 +301,6 @@
 
             const visibleFlows = Array.from(aggregatedFlows.values());
 
-            // 3. ATUALIZAR MUNICÍPIOS (CHOROPLETH)
             const volumes = Object.values(volByMun);
             const maxVol = volumes.length > 0 ? Math.max(...volumes) : 1;
 
@@ -314,19 +317,14 @@
                 }
             });
 
-            // 4. RENDERIZAR PONTOS E LINHAS
             let drawnPoints = new Set();
-            // Pega o maior volume de segmento para calcular a espessura relativa
             const maxSegmentVol = visibleFlows.length > 0 ? d3.max(visibleFlows, d => d.Volume_Tons) : 1;
-
-            // Criar um índice fixo para os produtos para aplicar o offset nas curvas
             const productNames = Object.keys(productColorMap);
 
             visibleFlows.forEach(d => {
                 const origCode = extractIBGE(d.Origin_ID);
                 const destCode = extractIBGE(d.Destination_ID);
 
-                // Pontos
                 [d.Origin_ID, d.Destination_ID].forEach(id => {
                     if (isProductionNode(id) || id === 'MERCADO_EXTERNO' || drawnPoints.has(id)) return;
                     const code = extractIBGE(id);
@@ -340,7 +338,6 @@
                     }
                 });
 
-                // Linhas
                 if (geoIndex[origCode]) {
                     const startArr = d3.geoCentroid(geoIndex[origCode]).reverse();
                     let endArr;
@@ -350,7 +347,6 @@
 
                     if (startArr && endArr) {
                         const productIndex = productNames.indexOf(d.Product);
-                        // Chama a curva passando o offset do produto, evita linhas de produtos diferentes sumirem uma embaixo da outra
                         const pts = getBezierPoints(
                             {lat: startArr[0], lng: startArr[1]}, 
                             {lat: endArr[0], lng: endArr[1]}, 

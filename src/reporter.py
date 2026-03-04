@@ -49,7 +49,7 @@ class SoyChainReporter:
                     
                     if dst_type == NodeType.PROCESSING:
                         # O "Processing" alvo geralmente é a entrada de GRÃOS para esmagamento
-                        if prod == ProductType.SOYBEAN:
+                        if prod == ProductType.SOYBEANS:
                             actuals["Processing"][prod] += var.varValue
                         
                         # Se você quiser medir "Produção Industrial" (quanto gerou de óleo):
@@ -91,7 +91,7 @@ class SoyChainReporter:
             if "Processing" in targets:
                 # A métrica de "Processing" só faz sentido para o GRÃO (Input).
                 # Para óleo/farelo, o dado seria "Production", que não estamos medindo aqui.
-                if prod_enum == ProductType.SOYBEAN:
+                if prod_enum == ProductType.SOYBEANS:
                      fmt_row("Processing", targets["Processing"], actuals["Processing"][prod_enum])
                 else:
                      # Se for Óleo/Farelo, Processing = 0 (eles são output, não input de esmagamento)
@@ -239,14 +239,13 @@ class SoyChainReporter:
         for (node_id, prod), var in self.solver.waste_vars.items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "[ALERTA_SLACK]",
-                    "Subtipo": "WASTE",
-                    "Node_ID": node_id,
-                    "Destino/Info":'NODE',
-                    "Produto": prod.value,
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": "Ver Matriz",
-                    "Variavel_Solver": var.name
+                    "cateogory": "[ALERT_SLACK]",
+                    "type": "WASTE",
+                    "node_id": node_id,
+                    "destination":'WASTE',
+                    "product": prod.value,
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # ==============================================================================
@@ -255,14 +254,13 @@ class SoyChainReporter:
         for (src, dst, mode, prod), var in self.solver.flow_vars.items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "REAL_LOGISTICA",
-                    "Subtipo": "FLUXO",
-                    "Node_ID": src,
-                    "Destino/Info": dst,
-                    "Produto": prod.value,
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": "Ver Matriz",
-                    "Variavel_Solver": var.name
+                    "category": "REAL_LOGISTIC",
+                    "type": "FLOW",
+                    "node_id": src,
+                    "destination": dst,
+                    "product": prod.value,
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # ==============================================================================
@@ -271,14 +269,13 @@ class SoyChainReporter:
         for (node_id, prod), var in self.solver.storage_vars.items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "REAL_ESTOQUE",
-                    "Subtipo": "FINAL_STOCK",
-                    "Node_ID": node_id,
-                    "Destino/Info": "-",
-                    "Produto": prod.value,
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": "Ver Node",
-                    "Variavel_Solver": var.name
+                    "category": "REAL_ESTOCK",
+                    "type": "FINAL_STOCK",
+                    "node_id": node_id,
+                    "destination": node_id,
+                    "product": prod.value,
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # ==============================================================================
@@ -288,14 +285,13 @@ class SoyChainReporter:
         for (node_id, prod), var in getattr(self.solver, 'export_vars', {}).items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "REAL_EXPORTACAO",
-                    "Subtipo": "EXPORT",
-                    "Node_ID": node_id,
-                    "Destino/Info": "MERCADO_EXTERNO",
-                    "Produto": prod.value,
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": self.solver.EXPORT_REWARD, # Mostra o prêmio
-                    "Variavel_Solver": var.name
+                    "category": "REAL_EXPORTS",
+                    "type": "EXPORTS",
+                    "node_id": node_id,
+                    "destination": "INTERNAL",
+                    "product": prod.value,
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # ==============================================================================
@@ -306,58 +302,53 @@ class SoyChainReporter:
         for node_id, var in self.solver.dummy_supply_vars.items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "[ALERTA_SLACK]",
-                    "Subtipo": "FALTA_INPUT (MAGIC SUPPLY)",
-                    "Node_ID": node_id,
-                    "Destino/Info": "Gerado do nada",
-                    "Produto": "GENERICO",
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": self.P_DUMMY,
-                    "Variavel_Solver": var.name
+                    "category": "[ALERT_SLACK]",
+                    "type": "LACK_INPUT (MAGIC SUPPLY)",
+                    "node_id": node_id,
+                    "destination": "DUMMY SUPPLY",
+                    "product": "GENERIC",
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # 4.2 Dummy Sink (Sobrou produto e não tem onde por)
         for node_id, var in self.solver.dummy_sink_vars.items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "[ALERTA_SLACK]",
-                    "Subtipo": "SOBRA_OUTPUT (LIXO)",
-                    "Node_ID": node_id,
-                    "Destino/Info": "Jogado fora",
-                    "Produto": "GENERICO",
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": self.P_DUMMY,
-                    "Variavel_Solver": var.name
+                    "category": "[ALERT_SLACK]",
+                    "type": "OVERFLOW (WASTER)",
+                    "node_id": node_id,
+                    "destination": "WAST",
+                    "product": "GENERIC",
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # 4.3 Slacks de Processamento (Yield quebrado)
-        # A estrutura aqui é um dicionário onde o value é uma tupla de variáveis (cake, oil)
         for node_id, (var_cake, var_oil) in self.solver.processing_slacks.items():
             
             # Checa Slack de Farelo
             if var_cake.varValue and var_cake.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "[ALERTA_SLACK]",
-                    "Subtipo": "YIELD_VIOLATION (CAKE)",
-                    "Node_ID": node_id,
-                    "Destino/Info": "Indústria",
-                    "Produto": "SOYBEAN_CAKE",
-                    "Volume": var_cake.varValue,
-                    "Custo_Unitario_Est": self.solver.P_MAGIC_GEN,
-                    "Variavel_Solver": var_cake.name
+                    "category": "[ALERT_SLACK]",
+                    "type": "YIELD_VIOLATION (CAKE)",
+                    "node_id": node_id,
+                    "destination": "INDUSTRY",
+                    "product": "SOYBEAN_CAKE",
+                    "volume": var_cake.varValue,
+                    "var_solver": var_cake.name
                 })
                 
             # Checa Slack de Óleo
             if var_oil.varValue and var_oil.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "[ALERTA_SLACK]",
-                    "Subtipo": "YIELD_VIOLATION (OIL)",
-                    "Node_ID": node_id,
-                    "Destino/Info": "Indústria",
-                    "Produto": "SOYBEAN_OIL",
-                    "Volume": var_oil.varValue,
-                    "Custo_Unitario_Est": self.solver.P_MAGIC_GEN,
-                    "Variavel_Solver": var_oil.name
+                    "category": "[ALERT_SLACK]",
+                    "type": "YIELD_VIOLATION (OIL)",
+                    "node_id": node_id,
+                    "destination": "INDUSTRY",
+                    "product": "SOYBEAN_OIL",
+                    "volume": var_oil.varValue,
+                    "var_solver": var_oil.name
                 })
 
         # 4.4 Slacks de Contrato (Se existirem)
@@ -368,14 +359,13 @@ class SoyChainReporter:
                 parts = name.split("_")
                 prod_guess = parts[-1]
                 records.append({
-                    "Categoria": "[ALERTA_SLACK]",
-                    "Subtipo": "CONTRATO_NAO_ATENDIDO",
-                    "Node_ID": name, # Ou tente parsear o ID
-                    "Destino/Info": "Multa Paga",
-                    "Produto": prod_guess,
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": self.solver.P_CONTRACT,
-                    "Variavel_Solver": var.name
+                    "category": "[ALERT_SLACK]",
+                    "type": "CONTRACT BROKEN",
+                    "node_id": name, # Ou tente parsear o ID
+                    "destination": "Multa Paga",
+                    "product": prod_guess,
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # ==============================================================================
@@ -386,14 +376,13 @@ class SoyChainReporter:
         for (node_id, prod), var in self.solver.domestic_vars.items():
             if var.varValue and var.varValue > TOLERANCE:
                 records.append({
-                    "Categoria": "DOMESTIC DEMAND",
-                    "Subtipo": "STOCK/DOMESTIC",
-                    "Node_ID": node_id,
-                    "Destino/Info": "INTERNAL",
-                    "Produto": prod.value,
-                    "Volume": var.varValue,
-                    "Custo_Unitario_Est": None,
-                    "Variavel_Solver": var.name
+                    "category": "DOMESTIC DEMAND",
+                    "type": "STOCK/DOMESTIC",
+                    "node_id": node_id,
+                    "destination": "INTERNAL",
+                    "product": prod.value,
+                    "volume": var.varValue,
+                    "var_solver": var.name
                 })
 
         # ==============================================================================
@@ -413,18 +402,18 @@ class SoyChainReporter:
         print(f"\n✅ Relatório detalhado salvo em: {filename}")
         print("\n--- RESUMO DE SLACKS (ONDE O MODELO FALHOU) ---")
         
-        slacks = df[df['Categoria'] == '[ALERTA_SLACK]']
+        slacks = df[df['category'] == '[ALERT_SLACK]']
         
         if slacks.empty:
             print("🎉 PARABÉNS! NENHUM SLACK UTILIZADO. O modelo é Feasible e Realista.")
         else:
             # Agrupa por subtipo para mostrar onde está o problema
-            summary = slacks.groupby(['Subtipo', 'Produto'])['Volume'].sum().reset_index()
-            summary['Custo_Estimado'] = summary.apply(
-                lambda x: x['Volume'] * (self.solver.P_DUMMY if 'SUPPLY' in x['Subtipo'] else self.solver.P_MAGIC_GEN), axis=1
+            summary = slacks.groupby(['type', 'product'])['volume'].sum().reset_index()
+            summary['estimatided_cost'] = summary.apply(
+                lambda x: x['volume'] * (self.solver.P_DUMMY if 'SUPPLY' in x['type'] else self.solver.P_MAGIC_GEN), axis=1
             )
-            summary['Volume'] = summary['Volume'].map('{:,.0f}'.format)
-            summary['Custo_Estimado'] = summary['Custo_Estimado'].map('R$ {:,.2f}'.format)
+            summary['volume'] = summary['volume'].map('{:,.0f}'.format)
+            summary['estimatided_cost'] = summary['estimatided_cost'].map('R$ {:,.2f}'.format)
             
             print(summary.to_string(index=False))
             print("\n⚠️  ATENÇÃO: Valores acima indicam que o modelo precisou 'inventar' ou 'jogar fora' soja.")

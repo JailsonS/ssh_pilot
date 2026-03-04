@@ -6,7 +6,7 @@ from collections import defaultdict
 
 
 class ProductType(Enum):
-    SOYBEAN = "SOYBEAN"
+    SOYBEANS = "SOYBEANS"
     SOYBEAN_CAKE = "SOYBEAN_CAKE"
     SOYBEAN_OIL = "SOYBEAN_OIL"
 
@@ -29,7 +29,7 @@ class NodeType(Enum):
 class Node:
     id: str
     type: NodeType
-    capacity: float = 100.0
+    capacity: float = 0.0
     production: float = 0.0       
     inventory_cost: float = 50
 
@@ -44,7 +44,7 @@ class Node:
 class Edge:
     source_id: str
     target_id: str
-    unit_cost: float
+    unit_cost: float = 120_000
     mode: str = "truck"
     max_capacity: float = 90_000_000 # infinity capacity for all routes
     

@@ -30,11 +30,11 @@ class SoyChainSolver:
         self.YIELD_CAKE = 0.78
         self.YIELD_OIL = 0.19
 
-        self.P_CONTRACT = 1_000_000.0   # Sufficient to be 100x higher than freight
-        self.P_DUMMY = 500_000.0        # The last resort
-        self.P_MAGIC_GEN = 500_000.0    # Magic generation in industry (avoid as much as possible)
-        self.EXPORT_REWARD = -100.0     # Incentive for the port to "pull" the cargo
-        self.DOMESTIC_REWARD = -50.0
+        self.P_CONTRACT = 2_000_000.0   # Sufficient to be 100x higher than freight
+        self.P_DUMMY = 400_000.0        # The last resort
+        self.P_MAGIC_GEN = 400_000.0    # Magic generation in industry (avoid as much as possible)
+        self.EXPORT_REWARD = -1_000_000.0     # Incentive for the port to "pull" the cargo
+        self.DOMESTIC_REWARD = -100_000.0
         
 
     def build_model(self):
@@ -77,10 +77,15 @@ class SoyChainSolver:
             allowed_stock = []
             
             if node.type in [NodeType.SILO_AGGREGATOR, NodeType.SILO_LOCAL, NodeType.HUB]:
-                allowed_stock = [ProductType.SOYBEAN] # Silos only store beans
-            
-            elif node.type in [NodeType.PROCESSING, NodeType.PORT]:
-                allowed_stock = [p for p in ProductType] # Factory/Port stores everything
+                allowed_stock = [ProductType.SOYBEANS] # Silos only store beans
+
+            elif node.type == NodeType.PROCESSING:
+                # Indústria guarda grão para esmagar e guarda farelo/óleo para vender
+                allowed_stock = [ProductType.SOYBEANS, ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]
+                
+            elif node.type == NodeType.PORT:
+                # Portos guardam tudo aguardando o navio
+                allowed_stock = [ProductType.SOYBEANS, ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]
             
             # Create variables only for allowed products
             for prod in allowed_stock:
@@ -89,17 +94,7 @@ class SoyChainSolver:
                     var_name, lowBound=0, cat='Continuous'
                 )
 
-        # 3. Waste Variables (Mostly for industry)
-        self.waste_vars = {}
-        for node_id, node in self.network.nodes.items():
-            if node.type == NodeType.PROCESSING:
-                for prod in [ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]:
-                    self.waste_vars[(node_id, prod)] = pulp.LpVariable(
-                        f"Waste_{node_id}_{prod.value}", 
-                        lowBound=0
-                    )
-
-        self.domestic_vars = {}
+        # 3. Domestic
         for node_id, node in self.network.nodes.items():
             if node.type == NodeType.PROCESSING:
                 for prod in [ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]:
@@ -131,6 +126,16 @@ class SoyChainSolver:
                     var_name, lowBound=0, cat='Continuous'
                 )
 
+        # 3. Waste Variables (Mostly for industry)
+        self.waste_vars = {}
+        for node_id, node in self.network.nodes.items():
+            if node.type == NodeType.PROCESSING:
+                for prod in [ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]:
+                    self.waste_vars[(node_id, prod)] = pulp.LpVariable(
+                        f"Waste_{node_id}_{prod.value}", 
+                        lowBound=0
+                    )
+
 
     def _set_objective(self):
         print("Setting Global Objective...")
@@ -138,26 +143,36 @@ class SoyChainSolver:
         edge_cost_map = {(e.source_id, e.target_id, e.mode): e.unit_cost for e in self.network.edges}
         node_inv_costs = {n_id: n.inventory_cost for n_id, n in self.network.nodes.items()}
 
-        # 1. Transport & Storage
+        # 1. Transport Costs
         transport_costs = (v * edge_cost_map.get((s, d, m), 0.0) for (s, d, m, p), v in self.flow_vars.items())
+
+        # 2. Storage Costs
         storage_costs = (v * node_inv_costs[n_id] for (n_id, p), v in self.storage_vars.items())
 
-        # 2. Slacks (Using the new calibrated constants)
-        dummy_costs = (v * self.P_DUMMY for v in list(self.dummy_supply_vars.values()) + list(self.dummy_sink_vars.values()))
+        # 3. Slacks (Using the new calibrated constants)
+        dummy_costs = (
+            v * self.P_DUMMY 
+            for v in 
+                list(self.dummy_supply_vars.values()) + 
+                list(self.dummy_sink_vars.values()) +
+                list(self.waste_vars.values()) 
+        )
+        
+        # 4. Contract Costs
         contract_costs = (v * self.P_CONTRACT for v in self.contract_slacks.values())
         
-        # Processing Slacks (adjusted to be read from the correct dictionary)
-        magic_processing_costs = []
-        for cake_s, oil_s in self.processing_slacks.values():
-            magic_processing_costs.append(cake_s * self.P_MAGIC_GEN)
-            magic_processing_costs.append(oil_s * self.P_MAGIC_GEN)
+        # 5. Processing Slacks (adjusted to be read from the correct dictionary)
+        magic_processing_costs = (
+            slack * self.P_MAGIC_GEN
+            for cake_s, oil_s in self.processing_slacks.values()
+            for slack in (cake_s, oil_s)
+        )
 
         # 3. Rewards (Export Incentive)
-        # We verify if export_vars exists to avoid errors
-        rewards = (v * self.EXPORT_REWARD for v in getattr(self, 'export_vars', {}).values())
-        domestic_rewards = (v * self.DOMESTIC_REWARD for v in getattr(self, 'domestic_vars', {}).values())
+        rewards = (v * self.EXPORT_REWARD for v in self.export_vars.values())
+        domestic_rewards = (v * self.DOMESTIC_REWARD for v in self.domestic_vars.values())
 
-        fixed_flow_penalties = (v * 2_000_000.0 for v in self.fixed_flow_slacks.values())
+        fixed_flow_penalties = (v * self.P_CONTRACT for v in self.fixed_flow_slacks.values())
         
         self.prob += (
             pulp.lpSum(transport_costs) + 
@@ -191,118 +206,154 @@ class SoyChainSolver:
                         
             # --- CASE 1: PRODUCTION (FARM) ---
             if node.type == NodeType.PRODUCTION:
-                beans_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEAN])
                 
-                stock_final = self.storage_vars.get((node_id, ProductType.SOYBEAN), 0)
-                
-                # Error Slack (only if the model cannot stock nor transport)
-                slack_error = self.dummy_sink_vars.get(node_id, 0)
-                
-                # NEW EQUATION: What was harvested has 3 destinations:
-                # 1. Use truck/train (Cost: Freight)
-                # 2. Stock cost (Cost: 1000 - YOUR NEW COST)
-                # 3. Use Slack (Cost: 1,000,000 - MAXIMUM PENALTY)
-                self.prob += (beans_out + stock_final + slack_error) == node.production, f"Supply_{node_id}"
-
-            # --- CASE 2: INDUSTRY/PROCESSING ---
-            elif node.type == NodeType.PROCESSING:
-                # Grain Input (Physical + Spot)
-                beans_in = pulp.lpSum(inbound_map[node_id][ProductType.SOYBEAN])
-                slack_in_beans = self.dummy_supply_vars.get(node_id, 0) 
-                
-                # Check beans out to block it
-                beans_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEAN])
-                
-                # Physical outputs
+                beans_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEANS])
                 cake_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEAN_CAKE])
                 oil_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEAN_OIL])
                 
-                # Stocks
+                self.prob += beans_out == node.production, f"Supply_{node_id}"
+                self.prob += (cake_out + oil_out) == 0, f"No_Magic_Gen_at_{node_id}" # Don't allow it!
+
+
+            # --- CASE 2: INDUSTRY/PROCESSING ---
+            elif node.type == NodeType.PROCESSING:
+                
+                # 1. Recuperar Estoques Iniciais (OFERTA FÍSICA)
+                init_beans = node.initial_inventory.get(ProductType.SOYBEANS.value, 0)
+                init_cake = node.initial_inventory.get(ProductType.SOYBEAN_CAKE.value, 0)
+                init_oil = node.initial_inventory.get(ProductType.SOYBEAN_OIL.value, 0)
+
+                # 2. Entradas e Saídas
+                beans_in = pulp.lpSum(inbound_map[node_id][ProductType.SOYBEANS])
+                beans_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEANS])
+                slack_in_beans = self.dummy_supply_vars.get(node_id, 0) 
+                
+                cake_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEAN_CAKE])
+                oil_out = pulp.lpSum(outbound_map[node_id][ProductType.SOYBEAN_OIL])
+                
+                # 3. Variáveis de Estoque Final
                 stock_cake = self.storage_vars.get((node_id, ProductType.SOYBEAN_CAKE), 0)
                 stock_oil = self.storage_vars.get((node_id, ProductType.SOYBEAN_OIL), 0)
-                stock_beans = self.storage_vars.get((node_id, ProductType.SOYBEAN), 0)
+                stock_beans = self.storage_vars.get((node_id, ProductType.SOYBEANS), 0)
 
-                # Domestic Demands
+                # 4. Variáveis de Mercado Doméstico (O "ralo" das sobras)
                 domestic_cake = self.domestic_vars.get((node_id, ProductType.SOYBEAN_CAKE), 0)
                 domestic_oil = self.domestic_vars.get((node_id, ProductType.SOYBEAN_OIL), 0)
                 
-                # Generation Slacks (Magic Generation) - Create unique names with ID
+                # 5. Variáveis de Folga (Magic Generation)
                 slack_make_cake = pulp.LpVariable(f"Magic_Gen_Cake_{node_id}", lowBound=0)
                 slack_make_oil = pulp.LpVariable(f"Magic_Gen_Oil_{node_id}", lowBound=0)
                 self.processing_slacks[node_id] = (slack_make_cake, slack_make_oil)
 
                 # ==========================================================
-                # The Carousel lock: Only the soybeans that were NOT shipped out as grain
-                # and did NOT remain in inventory are considered "Crushed"
+                # O CARROSSEL: Grãos Entrantes + Estoque Inicial - Estoque Final
                 # ==========================================================
-                crushed_beans = beans_in + slack_in_beans - beans_out - stock_beans
+                crushed_beans = beans_in + slack_in_beans + init_beans - stock_beans 
 
-                # Yield restrictions
-                self.prob += (crushed_beans * self.YIELD_CAKE) + slack_make_cake == (
+                # Restrições de Rendimento (Oferta = Demanda)
+                # Oferta: (Esmagamento * Rendimento) + Geração Mágica + ESTOQUE INICIAL
+                # Demanda: Saída (Export/Hubs) + Estoque Final + Mercado Doméstico + Lixo
+                
+                self.prob += (crushed_beans * self.YIELD_CAKE) + slack_make_cake + init_cake == (
                     cake_out + stock_cake + domestic_cake + self.waste_vars.get((node_id, ProductType.SOYBEAN_CAKE), 0)
                 ), f"Yield_Cake_{node_id}"
 
-                self.prob += (crushed_beans * self.YIELD_OIL) + slack_make_oil == (
+                self.prob += (crushed_beans * self.YIELD_OIL) + slack_make_oil + init_oil == (
                     oil_out + stock_oil + domestic_oil + self.waste_vars.get((node_id, ProductType.SOYBEAN_OIL), 0)
                 ), f"Yield_Oil_{node_id}"
                 
-                # Avoid negative crushing
+                # Regras de Negócio
                 self.prob += crushed_beans >= 0, f"Positive_Crush_{node_id}"
-                            
-            # --- CASE 3: SILOS/PORTS ---
-            else:
+                # self.prob += crushed_beans <= node.capacity * 1.2, f"Max_Crush_Capacity_{node_id}"
+                self.prob += beans_out == 0, f"No_Beans_Out_{node_id}"
+
+                # ==========================================================
+                # Força a Indústria a produzir e escoar a cota definida
+                # ==========================================================
+                for prod in [ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]:
+                    required_amount = node.contract_demands.get(prod, 0.0)
+                 
+                    if required_amount > 0.001:
+                        # Fluxo gerado = O que mandou pra fora + O que vendeu no mercado interno
+                        outbound_flow = pulp.lpSum(outbound_map[node_id][prod])
+                        domestic_flow = self.domestic_vars.get((node_id, prod), 0)
+                        total_supplied = outbound_flow + domestic_flow
+                        
+                        slack_name = f"Missed_Production_Quota_{node_id}_{prod.value}".replace("-", "_")
+                        slack_contract = pulp.LpVariable(slack_name, lowBound=0)
+                        self.contract_slacks[slack_name] = slack_contract
+                        
+                        self.prob += (total_supplied + slack_contract) >= required_amount, f"Processing_Quota_{node_id}_{prod.value}"
+
+            # --- CASE 4: PORTS ---
+            elif node.type == NodeType.PORT:
                 for product in ProductType:
+
+                    flow_in = pulp.lpSum(inbound_map[node_id][product])
+                    flow_out = pulp.lpSum(outbound_map[node_id][product])
+
+                    stock_final = self.storage_vars.get((node_id, product), 0)
+                    initial_inv = node.initial_inventory.get(product.value, 0)
+                    
+                    target_volume = node.contract_demands.get(product, 0)
+
+                    print('contract ports', product,target_volume)
+
+                    exported_var = pulp.LpVariable(
+                        f"Exported_{node_id}_{product.value}", 
+                        lowBound=0, 
+                        upBound=target_volume 
+                    )
+                    
+                    self.export_vars[(node_id, product)] = exported_var
+                    
+                    self.prob += (flow_in + initial_inv) == (stock_final + exported_var)
+                    self.prob += (flow_out) == 0
+
+
+            # --- CASE 5: TRAIN STATION ---
+            elif node.type == NodeType.TRAIN:
+                for product in ProductType:
+
+                    flow_in = pulp.lpSum(inbound_map[node_id][product])
+                    flow_out = pulp.lpSum(outbound_map[node_id][product])
+                    
+                    self.prob += flow_in == flow_out, f"Mass_Balance_Train_{node_id}_{product.value}"
+
+
+            else:
+
+                for product in ProductType:
+
                     flow_in = pulp.lpSum(inbound_map[node_id][product])
                     flow_out = pulp.lpSum(outbound_map[node_id][product])
                     
                     stock_final = self.storage_vars.get((node_id, product), 0)
                     initial_inv = node.initial_inventory.get(product.value, 0)
+ 
+                    # Silos/Hubs (Standard behavior)
+                    slack_out = self.dummy_sink_vars.get(node_id, 0)
                     
-                    # Port logic
-                    if node.type == NodeType.PORT:
-                        # Port is a SINK what goes in disappears to external market
-                        target_volume = node.contract_demands.get(product, 0)
-#
-                        exported_var = pulp.LpVariable(
-                            f"Exported_{node_id}_{product.value}", 
-                            lowBound=0, 
-                            upBound=target_volume 
-                        )
-                       
-                        # 
-                        self.export_vars = getattr(self, 'export_vars', {})
-                        self.export_vars[(node_id, product)] = exported_var
-                       
-                        # Restriction: Everything that comes in goes out as "Exported" (or stays in stock if we want to store it)
-                        self.prob += (flow_in + initial_inv) == (flow_out + stock_final + exported_var)
-                            
-                    else:
-                        # Silos/Hubs (Standard behavior)
-                        slack_out = self.dummy_sink_vars.get(node_id, 0)
-                        self.prob += (flow_in + initial_inv) == (flow_out + stock_final + slack_out)
+                    self.prob += (flow_in + initial_inv) == (flow_out + stock_final + slack_out)
+                    self.prob += stock_final <= node.capacity, f"Max_Stock_{node_id}_{product.value}"
 
-                        if node.capacity and node.capacity > 0:
-                            self.prob += stock_final <= node.capacity, f"Max_Stock_{node_id}_{product.value}"
+                    if node.type == NodeType.HUB:
+                        # Road or Waterway Hubs (Transshipment)
+                        self.prob += flow_in <= (node.capacity * 20.0) # Turnover 15x
+                        self.prob += stock_final <= (node.capacity * 0.1) # Max 10% remains for the end of the year
 
-                        if node.type == NodeType.TRAIN:
-                            # Railway Hubs: Giant throughput, zero retained stock.
-                            self.prob += flow_in <= (node.capacity * 25.0) # Turnover 25x
-                            self.prob += stock_final == 0 # Forbidden to store from one year to the next
-
-                        elif node.type == NodeType.HUB:
-                            # Road or Waterway Hubs (Transshipment)
-                            self.prob += flow_in <= (node.capacity * 15.0) # Turnover 15x
-                            self.prob += stock_final <= (node.capacity * 0.1) # Max 10% remains for the end of the year
-
-                        elif node.type in [NodeType.SILO_AGGREGATOR, NodeType.SILO_LOCAL]:
-                            # The Interior Lungs (Where the real stock stays)
-                            self.prob += flow_in <= (node.capacity * 3.0) # Turnover 3x (Soybean harvest + Corn off-season)
-                            # No need to force stock_final = 0. Let the solver decide to store here
+                    elif node.type == NodeType.SILO_AGGREGATOR:
+                        # The Interior Lungs (Where the real stock stays)
+                        self.prob += flow_in <= (node.capacity * 10.0) # Turnover 5x (Soybean harvest + Corn off-season)
 
 
-            # CASE 4: CONTRACTS - DECISION TREE OUTPUTS 
+            # CASE 6: CONTRACTS - DECISION TREE OUTPUTS 
             for product, required_amount in node.contract_demands.items():
                 if required_amount > 0.001:
+
+                    if node.type == NodeType.PROCESSING and product in [ProductType.SOYBEAN_CAKE, ProductType.SOYBEAN_OIL]:
+                        continue
+
                     flow_in_contract = pulp.lpSum(inbound_map[node_id][product])
                     
                     # Unique name for the contract slack to avoid overlap

@@ -4,23 +4,18 @@ from src.domain import Node, NodeType, SupplyChainNetwork, Edge, ProductType
 from collections import defaultdict
 
 
-DISTANCE_THRESHOULD = 120_000
-
-
 def load_truck_cost_matrix(file_path: str, network: SupplyChainNetwork):
     print(f"Loading Cost Matrix with Smart-Matching (BR-*) from {file_path}...")
     
-    # Lê tudo como string para garantir match exato
     df = pd.read_csv(file_path, delimiter=';')
-    df = df[df['cost'] < 40]
 
     print(f'Número de rotas antes da filtragem {df.shape[0]}')
-
-
-    # df = df[df['cost'] < 60].copy()
-    df['cost'] = df['cost'].mul(3600)
-
+    # df = df[df['cost'] < 30].copy()
     print(f'Número de rotas após a filtragem {df.shape[0]}')
+
+    df['cost'] = df['cost'].mul(3600)
+    df['origin'] = df['origin'].str.replace('-', '_')
+    df['destination'] = df['destination'].str.replace('-', '_')
 
     # ---------------------------------------------------------
     # PASSO 1: Mapear Nós usando a chave 'BR-...'
@@ -36,7 +31,7 @@ def load_truck_cost_matrix(file_path: str, network: SupplyChainNetwork):
         Ex: 'PRODUCTION-MT-BR-5107909' -> 'BR-5107909'
         Ex: 'BR-1234567' -> 'BR-1234567'
         """
-        keyword = "BR-"
+        keyword = "BR_"
         start_index = node.id.find(keyword)
         
         geo_key = node.id[start_index:] if start_index != -1 else node.id[start_index:]
@@ -58,11 +53,7 @@ def load_truck_cost_matrix(file_path: str, network: SupplyChainNetwork):
         # Na matriz: municipality_origin = "BR-5300108"
         origin_key = str(row['origin']).strip()
         dest_key = str(row['destination']).strip()
-        
-        try:
-            cost = float(row['cost'])
-        except (ValueError, TypeError):
-            continue
+        cost = float(row['cost'])
 
         # Verifica se temos nós nessas chaves
         if origin_key not in nodes_by_location:
@@ -87,12 +78,7 @@ def load_truck_cost_matrix(file_path: str, network: SupplyChainNetwork):
                     continue
                 
                 # Validação de Negócio (Fazenda -> Silo, etc)
-                if not is_valid_route(source_node.type, target_node.type):
-                    ignored_logic += 1
-                    continue
-
-                # PRUNING 3: Regra de Eficiência de Distância
-                if cost > DISTANCE_THRESHOULD and target_node.type not in [NodeType.PORT, NodeType.TRAIN, NodeType.PROCESSING]:
+                if not is_valid_route(source_node.type, target_node.type, cost):
                     ignored_logic += 1
                     continue
             
@@ -103,7 +89,7 @@ def load_truck_cost_matrix(file_path: str, network: SupplyChainNetwork):
                     target_id=target_node.id,
                     mode=mode,
                     unit_cost=cost,
-                    max_capacity=1e15 # Capacidade ilimitada 
+                    max_capacity=1e15 
                 )
                 network.add_edge(edge)
                 count += 1
@@ -158,7 +144,7 @@ def load_silo_nodes(file_path: str, network: SupplyChainNetwork):
         trase_id = str(row['node_id'])
 
         # O ID do Nó Silo (ex: "SILO_AGGREGATOR-BR-5107909")
-        silo_node_id = f'{silo_type}-{trase_id}'
+        silo_node_id = f'{silo_type}_{trase_id}'
 
         # Cria o Nó Silo
         node = Node(
@@ -187,9 +173,11 @@ def load_port_nodes(file_path: str, network: SupplyChainNetwork):
     for _, row in df_ports_pivot.iterrows():
         node_id = str(row['target_id'])
 
+        node_id = f'PORT_{node_id}'
+
         vol_cake = float(pd.to_numeric(row.get(ProductType.SOYBEAN_CAKE.value, 0), errors="coerce") or 0)
         vol_oil = float(pd.to_numeric(row.get(ProductType.SOYBEAN_OIL.value, 0), errors="coerce") or 0)
-        vol_bean = float(pd.to_numeric(row.get(ProductType.SOYBEAN.value, 0), errors="coerce") or 0)
+        vol_bean = float(pd.to_numeric(row.get(ProductType.SOYBEANS.value, 0), errors="coerce") or 0)
 
         volume_total = vol_bean + vol_cake + vol_oil
 
@@ -198,7 +186,7 @@ def load_port_nodes(file_path: str, network: SupplyChainNetwork):
             type=NodeType.PORT,
             capacity=volume_total,
             contract_demands={
-                ProductType.SOYBEAN: vol_bean,
+                ProductType.SOYBEANS: vol_bean,
                 ProductType.SOYBEAN_CAKE: vol_cake,
                 ProductType.SOYBEAN_OIL: vol_oil
             }
@@ -212,18 +200,65 @@ def load_train_nodes(file_path: str, network: SupplyChainNetwork):
     print(f"Loading port data from {file_path}...")
     df = pd.read_csv(file_path, delimiter=';')
 
-    df_stations = pd.DataFrame(
-        pd.concat([df['origin_id'], df['dest_id']]).unique(),
-        columns=['node_id']
-    )
+    df_stations_departure = df[['origin_id','volume', 'product_type']].groupby(
+        ['origin_id','product_type']
+    )[['volume']].sum().reset_index()
 
-    for _, row in df_stations.iterrows():
-        node_id = str(row['node_id'])
-        
+    df_stations_arrivel = df[['dest_id','volume', 'product_type']].groupby(
+        ['dest_id','product_type']
+    )[['volume']].sum().reset_index()
+
+
+    df_departure_pivot = df_stations_departure.pivot_table(
+        index='origin_id', 
+        columns='product_type', 
+        values='volume', 
+        fill_value=0 # Preenche com 0 caso a estação não tenha um dos produtos
+    ).reset_index()
+
+
+    df_arrivel_pivot = df_stations_arrivel.pivot_table(
+        index='dest_id', 
+        columns='product_type', 
+        values='volume', 
+        fill_value=0 # Preenche com 0 caso a estação não receba um dos produtos
+    ).reset_index()
+
+    df_arrivel_pivot.columns.name = None
+    df_departure_pivot.columns.name = None
+
+    print("\n--- (Departure) ---")
+    print(df_departure_pivot.head())
+
+    print("\n--- (Arrival) ---")
+    print(df_arrivel_pivot.head())
+
+    # Creating nodes of arrival stations
+    for _, row in df_arrivel_pivot.iterrows():
+        node_id = str(row['dest_id'])
+        capacity = row['SOYBEANS'] + row['SOYBEAN_CAKE']
         node = Node(
             id=node_id,
             type=NodeType.TRAIN,
-            capacity=1_000_000.,
+            capacity=capacity,
+            contract_demands={
+                ProductType('SOYBEANS'): float(row['SOYBEANS']),
+                ProductType('SOYBEAN_CAKE'): float(row['SOYBEAN_CAKE']),
+            }
+        )
+        network.add_node(node)
+
+    for _, row in df_departure_pivot.iterrows():
+        node_id = str(row['origin_id'])
+        capacity = row['SOYBEANS'] + row['SOYBEAN_CAKE']
+        node = Node(
+            id=node_id,
+            type=NodeType.TRAIN,
+            capacity=capacity,
+            contract_demands={
+                ProductType('SOYBEANS'): float(row['SOYBEANS']),
+                ProductType('SOYBEAN_CAKE'): float(row['SOYBEAN_CAKE']),
+            }
         )
         network.add_node(node)
 
@@ -246,9 +281,11 @@ def load_processing_nodes(file_path: str,  network: SupplyChainNetwork):
         df["capacity_tons"] * NATIONAL_VOL_CAKE / total_capacity * 1.031
     )
 
-    df["vol_processed_beans_for_oil"] = (
-        df["capacity_tons"] * NATIONAL_VOL_OIL / total_capacity * 1.031
-    )
+    # df["vol_processed_beans_for_oil"] = (
+    #     df["capacity_tons"] * NATIONAL_VOL_OIL / total_capacity * 1.031
+    # )
+
+    df["vol_processed_beans_for_oil"] = df["vol_processed_beans_for_cake"] * (0.19 / 0.78)
     
     for _, row in df.iterrows():
         node_id = str(row['node_id'])
@@ -277,6 +314,8 @@ def load_train_constraint(file_path: str, network: SupplyChainNetwork):
     """
     print(f"Loading rail data from {file_path}...")
     df = pd.read_csv(file_path, delimiter=';')
+
+    df = df.groupby(by=['dest_id', 'origin_id', 'product_type'])['volume'].sum().reset_index()
     
     count = 0
     for _, row in df.iterrows():
@@ -291,24 +330,24 @@ def load_train_constraint(file_path: str, network: SupplyChainNetwork):
         # Validation: Ensure stations exist as Nodes 
         if origin in network.nodes and dest in network.nodes:
 
-            network.add_constraint(
-                source_id=origin,
-                target_id=dest,
-                product=product_enum,
-                volume=volume,
-                type='equal' 
-            )
-
-            # edge = Edge(
+            # network.add_constraint(
             #     source_id=origin,
             #     target_id=dest,
-            #     mode='train',
-            #     unit_cost=5,
-            #     fixed_flow=volume,
-            #     fixed_product=product_enum
+            #     product=product_enum,
+            #     volume=volume,
+            #     type='equal' 
             # )
 
-            # network.add_edge(edge)
+            edge = Edge(
+                source_id=origin,
+                target_id=dest,
+                mode='train',
+                unit_cost=0,
+                fixed_flow=volume,
+                fixed_product=product_enum
+            )
+
+            network.add_edge(edge)
 
             count += 1
         else:
@@ -332,51 +371,60 @@ def load_fixed_flows_as_constraint(file_path: str,  network: SupplyChainNetwork)
 
     # 2. adjust source id. 
     mask_1 = df['branch'].str.startswith('1.')
-    df.loc[mask_1, 'source_id'] = df.loc[mask_1, 'source_id'].str.replace('PORT', 'PRODUCTION')
+    df.loc[mask_1, 'source_id'] = 'PRODUCTION_' + df.loc[mask_1, 'source_id'].astype(str)
 
     mask_2 = df['branch'].str.startswith('2.')
-    df.loc[mask_2, 'source_id'] = df.loc[mask_2, 'source_id'].str.replace('PORT', 'HUB')
-    
+    df.loc[mask_2, 'source_id'] = 'HUB_' + df.loc[mask_2, 'source_id'].astype(str)
+
     mask_3 = df['branch'].str.startswith('3.')
-    df.loc[mask_3, 'source_id'] = df.loc[mask_3, 'source_id'].str.replace('PORT', 'PROCESSING')
+    df.loc[mask_3, 'source_id'] = 'PROCESSING_' + df.loc[mask_3, 'source_id'].astype(str)
+
+    # rename taget_id
+    df['target_id'] = 'PORT_' + df['target_id'].fillna('').astype(str)
+    df['product_type'] = df['product_type'].str.replace(' ', '_')
 
     df = df[['product_type', 'source_id', 'target_id', 'port_of_export_name', 'volume']].groupby(
         ['product_type', 'source_id', 'target_id', 'port_of_export_name'],
         as_index=False
     )['volume'].sum()
 
-    for _, row in df.iterrows():        
-        # Parse Product Type
+    network = load_missing_nodes(df, network)
+
+    for _, row in df.iterrows():
         prod_str = str(row['product_type']).strip()
         try:
-            # Map "Soybean" -> ProductType.SOYBEAN
             product_enum = ProductType(prod_str) 
         except ValueError:
             print(f"Warning: Unknown product {prod_str}, skipping.")
             continue
         
-        # Simplificando o acesso aos IDs
         source_id = str(row['source_id'])
         target_id = str(row['target_id'])
 
-        # Descobre os NodeTypes baseados no prefixo (Ex: "PRODUCTION-123" -> "PRODUCTION")
-        # Adicionado um bloco try/except caso venha algum ID fora do padrão mapeado no Enum
-        try:
-            node_type_source = NodeType(source_id.split('-')[0])
-            node_type_target = NodeType(target_id.split('-')[0])
-        except ValueError as e:
-            print(f"Warning: Falha ao identificar o tipo de nó para {source_id} ou {target_id}. Detalhes: {e}")
-            continue
 
-        # --- CRIAÇÃO CONDICIONAL DOS NÓS ---
-        
-        # Verifica se o source já existe na rede; se não, cria e adiciona
-        if source_id not in network.nodes:
-            network.add_node(Node(id=source_id, type=node_type_source))
-            
-        # Verifica se o target já existe na rede; se não, cria e adiciona
-        if target_id not in network.nodes:
-            network.add_node(Node(id=target_id, type=node_type_target))
+        # --- ADDING EDGES IF THEY ARE NOT IN THE NETWORK ---
+        if not any(
+            e.source_id == source_id and
+            e.target_id == target_id
+            for e in network.edges
+        ):
+            print(f'Warning: route not found {source_id} -> {target_id}')
+
+            # If production node is not in network it was added as HUB
+            if source_id.startswith('PRODUCTION') and source_id not in network.nodes:
+                print('Changing node name')
+                source_id = source_id.replace('PRODUCTION', 'HUB')
+
+            print('Creating new edge')
+            network.add_edge(
+                Edge(
+                    source_id=source_id,
+                    target_id=target_id,
+                    mode='truck'
+                )
+            )
+        else:
+            print(f'Success: route found {source_id} -> {target_id}')
 
         # Registra a obrigação de fluxo
         network.add_constraint(
@@ -405,7 +453,7 @@ def load_distribution_initial_stocks(network: SupplyChainNetwork, abiove_referen
         print("WARNING: No Silo capacity found to store initial stock.")
         return
     
-    total_initial_stock_beans_tons = abiove_reference[ProductType.SOYBEAN.value]['Initial stock']
+    total_initial_stock_beans_tons = abiove_reference[ProductType.SOYBEANS.value]['Initial stock']
     total_initial_stock_cake_tons = abiove_reference[ProductType.SOYBEAN_CAKE.value]['Initial stock'] 
     total_initial_stock_oil_tons = abiove_reference[ProductType.SOYBEAN_OIL.value]['Initial stock']
 
@@ -427,7 +475,7 @@ def load_distribution_initial_stocks(network: SupplyChainNetwork, abiove_referen
             # --- FIXED: Assign a Dictionary, defaulting to SOYBEAN ---
             # Old Code: node.initial_inventory = stock_val
             node.initial_inventory = {
-                ProductType.SOYBEAN.value: stock_val
+                ProductType.SOYBEANS.value: stock_val
             }
             
             count += 1
@@ -450,29 +498,79 @@ def load_distribution_initial_stocks(network: SupplyChainNetwork, abiove_referen
     print(f"Allocated initial stock to {count} silos.")
 
 
-def is_valid_route(src_type: NodeType, dst_type: NodeType) -> bool:
+def load_missing_nodes(df: pd.DataFrame, network: SupplyChainNetwork):
+    
+    df_source_id = df[['source_id', 'volume']].groupby(['source_id'])['volume'].sum().reset_index()
+
+    for _, row in df_source_id.iterrows():
+
+        source_id = row['source_id']
+        volume = float(row['volume'])
+
+        try:
+            node_type_source = NodeType(source_id.split('_')[0])
+        except ValueError as e:
+            print(f"Warning: Falha ao identificar o tipo de nó para {source_id}. Detalhes: {e}")
+            continue
+
+        for node_id, node_type in [(source_id, node_type_source)]:
+            if node_id not in network.nodes:
+                
+                # Regra 1: Produção vira Hub
+                if node_id.startswith('PRODUCTION'):
+                    node_id = node_id.replace('PRODUCTION', 'HUB')
+                    node_type = NodeType('HUB')
+                    node_capacity = volume
+                
+                # Regra 2: Indústrias não mapeadas pela ABIOVE
+                elif node_type == NodeType.PROCESSING:
+                    # Engenharia Reversa: Se eu preciso escoar 'volume' de Farelo (78%) ou Óleo (19%), 
+                    # quanta soja a fábrica precisa aguentar esmagar?
+                    # Assumimos o pior caso (farelo, que dita o maior volume) e damos uma margem de folga (1.1)
+                    node_capacity = (volume / 0.78) * 1.5
+                    print(f"⚠️ Criando Indústria Fantasma: {node_id} com capacidade expandida para {node_capacity:.0f} tons.")
+                
+                # Regra 3: Demais nós (Silos, Portos, etc)
+                else:
+                    node_capacity = volume
+
+                print(f'Creating missing node: {node_id} (Type: {node_type})')
+                network.add_node(
+                    Node(
+                        id=node_id, 
+                        type=node_type, 
+                        capacity=node_capacity,
+                        inventory_cost=3.0 if node_type == NodeType.PROCESSING else 5.0 # Adiciona custo default
+                    )
+                )
+
+    return network
+
+
+def is_valid_route(src_type: NodeType, dst_type: NodeType, cost) -> bool:
     """
     Define as regras de negócio: O que pode conectar com o que?
     """
     
+    if dst_type in [NodeType.PORT] and cost < 10 * 3600:
+        return True
+    
     # REGRA 1: SILOS (Concentradores de Grãos)
     # Podem mandar para: Outros Silos, Portos, Indústrias
-    if src_type in [NodeType.SILO_AGGREGATOR, NodeType.SILO_LOCAL, NodeType.HUB]:
+    if src_type in [NodeType.SILO_AGGREGATOR, NodeType.SILO_LOCAL]:
         if dst_type in [
             NodeType.SILO_AGGREGATOR, 
-            NodeType.PORT, 
             NodeType.PROCESSING,
             NodeType.HUB,
             NodeType.TRAIN
         ]:
             return True
-
+        
     # REGRA 2: INDÚSTRIA (Processadores)
     # Podem mandar para: Portos (Exportar Óleo/Farelo) ou Silos (raro, mas possível para estocar)
     # ou Mercados Domésticos (se você tiver esse nó)
     if src_type == NodeType.PROCESSING:
         if dst_type in [
-            NodeType.PORT,
             NodeType.HUB,
             NodeType.TRAIN
         ]:
@@ -486,17 +584,15 @@ def is_valid_route(src_type: NodeType, dst_type: NodeType) -> bool:
         if dst_type in [
             NodeType.PROCESSING, 
             NodeType.HUB,  
-            NodeType.PORT,
             NodeType.TRAIN
         ]:
             return True
 
     if src_type == NodeType.TRAIN:
-        # O trem pode descarregar em:
-        # 1. Outra estação de trem (conexão de trilhos)
-        # 2. Porto (Exportação)
-        # 3. Indústria (Para esmagamento)
-        # 4. Silo/Hub (Transbordo)
-        if dst_type in [NodeType.TRAIN, NodeType.PORT, NodeType.PROCESSING, NodeType.HUB]:
+        if dst_type == NodeType.PORT and cost < 5 * 3600:
             return True
+        
+        if dst_type in [NodeType.TRAIN, NodeType.PROCESSING, NodeType.HUB]:
+            return True
+                
     return False
