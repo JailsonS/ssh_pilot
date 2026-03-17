@@ -33,10 +33,10 @@ class Node:
     production: float = 0.0       
     inventory_cost: float = 50
 
-    # Ex: {ProductType.SOYBEAN: 1000, ProductType.SOYBEAN_CAKE: 500}
+    # E.g.: {ProductType.SOYBEAN: 1000, ProductType.SOYBEAN_CAKE: 500}
     contract_demands: Dict[ProductType, float] = field(default_factory=lambda: defaultdict(float))
 
-    # NEW: Initial Stock is now a dictionary: {'Soybean': 100, 'Soybean_Cake': 0}
+    # Initial Stock is now a dictionary: {'Soybean': 100, 'Soybean_Cake': 0}
     initial_inventory: Dict[str, float] = field(default_factory=dict)
 
 
@@ -76,7 +76,7 @@ class SupplyChainNetwork:
     def add_edge(self, edge: 'Edge'):
         self.edges.append(edge)
 
-    def add_constraint(self, source_id: str, target_id: str, product, volume: float, type: str = 'min'):
+    def add_constraint(self, source_id: str, target_id: str, product: ProductType, volume: float, type: str = 'min'):
         """Registra uma obrigação de fluxo entre dois nós."""
         self.constraints.append(
             FlowConstraint(

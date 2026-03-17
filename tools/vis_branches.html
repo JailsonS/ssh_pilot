@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trase Map - Supply Chain</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+
+    <style>
+        :root {
+            --trase-dark: #1a1a1a;
+            --panel-bg: rgba(30, 30, 30, 0.95);
+            --route-color: #F9B624;
+        }
+
+        body { margin: 0; padding: 0; font-family: 'Lato', sans-serif; background-color: var(--trase-dark); color: white; }
+        #map { height: 100vh; width: 100%; z-index: 1; background: #111; }
+        
+        #sidebar {
+            position: absolute; top: 20px; left: 20px; width: 340px;
+            background: var(--panel-bg); padding: 25px; border-radius: 4px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5); z-index: 1000;
+            border-left: 4px solid var(--route-color);
+            max-height: 90vh; overflow-y: auto; backdrop-filter: blur(5px);
+        }
+        
+        h1 { margin-top: 0; font-size: 22px; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #444; padding-bottom: 15px; }
+        
+        .control-group { margin-top: 15px; }
+        label { display: block; font-size: 11px; text-transform: uppercase; font-weight: 700; color: #aaa; margin-bottom: 6px; }
+        
+        /* Select2 Dark */
+        .select2-container--default .select2-selection--single { background-color: #333; border: 1px solid #555; height: 38px; color: white; }
+        .select2-container--default .select2-selection--single .select2-selection__rendered { color: white; line-height: 36px; }
+        .select2-dropdown { background-color: #333; color: white; border: 1px solid #555; }
+
+        button { width: 100%; padding: 12px; background-color: #008985; color: white; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; margin-top: 20px; }
+        
+        #loader {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 9999;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+        .spinner { width: 50px; height: 50px; border: 5px solid #333; border-top: 5px solid var(--route-color); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        .hidden { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }
+
+        .legend-item { display: flex; align-items: center; margin-bottom: 8px; font-size: 13px; color: #eee; }
+        .line-legend { width: 20px; height: 4px; margin-right: 10px; display: inline-block; background: var(--route-color); }
+        .dot { width: 12px; height: 12px; margin-right: 10px; display: inline-block; border: 1px solid rgba(255,255,255,0.3); border-radius:50%; }
+    </style>
+</head>
+<body>
+
+    <div id="loader"> <div class="spinner"></div>
+        <div id="loader-text" style="margin-top:10px;">Loading Network Data...</div>
+    </div>
+    <div id="sidebar">
+        <h1>Supply <span>Chain</span></h1>
+        
+        <div class="control-group">
+            <label>1. PRODUCT</label>
+            <select id="filterProduct" style="width:100%"><option value="ALL">All Products</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>2. EXPORTER GROUP</label>
+            <select id="filterExporter" style="width:100%"><option value="ALL">All Exporters</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>3. BRANCH</label>
+            <select id="filterBranch" style="width:100%"><option value="ALL">All Branches</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>4. LOGISTICS HUB</label>
+            <select id="filterHub" style="width:100%"><option value="ALL">All Hubs</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>5. PORT OF EXPORT</label>
+            <select id="filterPort" style="width:100%"><option value="ALL">All Ports</option></select>
+        </div>
+
+        <button onclick="applyFilters()">Apply Filters</button>
+        
+        <div id="stats" style="margin-top:20px">
+            <div>Unique Routes drawn: <span id="routeCount" style="color:#F9B624; font-weight:bold">0</span></div>
+        </div>
+
+        <div style="margin-top:20px; border-top: 1px solid #444; padding-top:15px">
+            <label>LEGEND (Hub Volume in Municipality)</label>
+            <div id="choroplethLegend" style="height: 10px; background: linear-gradient(to right, #edf8e9, #006d2c); margin-bottom: 5px;"></div>
+            <div style="display:flex; justify-content: space-between; font-size:10px"><span>Low Vol</span><span>High Vol</span></div>
+        </div>
+
+        <div class="legend-section" style="margin-top: 20px; border-top: 1px solid #444; padding-top: 15px;">
+            <div class="legend-title" style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #aaa; margin-bottom: 10px;">Map Elements</div>
+            <div class="legend-item"><span class="line-legend"></span> Cargo Route (Thickness = Volume)</div>
+            <div class="legend-item"><span class="dot" style="background:#e74c3c;"></span> Export Port</div>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylinedecorator.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    
+    <script>
+        const CSV_URL = "branches.csv"; 
+        
+        const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([-15.79, -47.88], 4);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: '&copy; CARTO' }).addTo(map);
+
+        let municipalityLayer = L.layerGroup().addTo(map);
+        let flowLayer = L.layerGroup().addTo(map);
+        let pointLayer = L.layerGroup().addTo(map); 
+        
+        let municipalityShapes = {}; 
+        let geoIndex = {}, ibgeNameMap = {};
+        
+        let pathsData = []; 
+
+        function extractIBGE(fullId) {
+            if (!fullId || fullId.includes('XXXXXXX')) return null;
+            return fullId.replace('BR_', '');
+        }
+
+        function formatNodeLabel(nodeId, defaultName = null) {
+            const ibge = extractIBGE(nodeId);
+            if (!ibge) return defaultName || nodeId;
+            const cityName = ibgeNameMap[ibge]; 
+            return cityName ? cityName : (defaultName || nodeId);
+        }
+
+        // Simplificada: Removemos o offsetMultiplier pois agora só temos 1 linha por Origem-Destino
+        function getBezierPoints(start, end, curvature = 0.2) {
+            var midLat = (start.lat + end.lat) / 2, midLng = (start.lng + end.lng) / 2;
+            var distLat = end.lat - start.lat, distLng = end.lng - start.lng;
+            var controlLat = midLat - (distLng * curvature), controlLng = midLng + (distLat * curvature);
+            var points = [];
+            for (var t = 0; t <= 1; t += 0.05) {
+                points.push([
+                    (1 - t) * (1 - t) * start.lat + 2 * (1 - t) * t * controlLat + t * t * end.lat,
+                    (1 - t) * (1 - t) * start.lng + 2 * (1 - t) * t * controlLng + t * t * end.lng
+                ]);
+            }
+            return points;
+        }
+
+        async function loadData() {
+            try {
+                const geoResponse = await fetch('https://raw.githubusercontent.com/tbrugz/geodata-br/master/geojson/geojs-100-mun.json');
+                const rawGeoData = await geoResponse.json();
+                
+                L.geoJSON(rawGeoData, {
+                    style: { fillColor: 'rgba(255,255,255,0.05)', weight: 0.2, color: '#444', fillOpacity: 0.1 },
+                    onEachFeature: (feature, layer) => {
+                        const ibge = String(feature.properties.id);
+                        municipalityShapes[ibge] = layer;
+                        ibgeNameMap[ibge] = feature.properties.name;
+                        geoIndex[ibge] = feature;
+                    }
+                }).addTo(municipalityLayer);
+
+                const rawCsv = await d3.dsv(";", CSV_URL);
+                pathsData = [];
+                let uniqueProducts = new Set(), uniqueExporters = new Set(), uniqueBranches = new Set(), uniqueHubs = new Set(), uniquePorts = new Set();
+                
+                rawCsv.forEach(d => {
+                    const productType = (d.product_type || "").trim();
+                    const exporterGroup = (d.exporter_group || "").trim();
+                    const branch = (d.branch || "").trim();
+                    const hubId = (d['logistics_hub.trase_id'] || "").trim();
+                    const portName = (d.port_of_export_name || "").trim();
+                    const portId = (d.port_municipality_trase_id || "").trim();
+                    const volume = parseFloat((d.volume || "0").replace(',', '.'));
+
+                    if (volume > 0) {
+                        pathsData.push({ productType, exporterGroup, branch, hubId, portName, portId, volume });
+
+                        if (productType) uniqueProducts.add(productType);
+                        if (exporterGroup && exporterGroup !== 'UNKNOWN') uniqueExporters.add(exporterGroup);
+                        if (branch) uniqueBranches.add(branch);
+                        if (hubId && !hubId.includes('XXXXXXX')) uniqueHubs.add(hubId);
+                        if (portName) uniquePorts.add(portName);
+                    }
+                });
+
+                // Preencher Selects
+                const prodSel = document.getElementById('filterProduct');
+                [...uniqueProducts].sort().forEach(p => { prodSel.options.add(new Option(p, p)); });
+
+                const expSel = document.getElementById('filterExporter');
+                [...uniqueExporters].sort().forEach(exp => { expSel.options.add(new Option(exp, exp)); });
+                
+                const branchSel = document.getElementById('filterBranch');
+                [...uniqueBranches].sort().forEach(b => { branchSel.options.add(new Option(b, b)); });
+
+                const hubSel = document.getElementById('filterHub');
+                [...uniqueHubs].sort().forEach(h => { hubSel.options.add(new Option(formatNodeLabel(h), h)); });
+
+                const portSel = document.getElementById('filterPort');
+                [...uniquePorts].sort().forEach(p => { portSel.options.add(new Option(p, p)); });
+
+                // Inicializar Select2
+                $('#filterProduct, #filterExporter, #filterBranch, #filterHub, #filterPort').select2();
+                
+                applyFilters();
+                document.getElementById('loader').classList.add('hidden');
+
+            } catch (err) { 
+                console.error("Erro fatal:", err);
+                document.getElementById('loader-text').innerText = "Error: Check Console.";
+            }
+        }
+
+        function applyFilters() {
+            flowLayer.clearLayers();
+            pointLayer.clearLayers();
+
+            const fProd = document.getElementById('filterProduct').value;
+            const fExp = document.getElementById('filterExporter').value;
+            const fBra = document.getElementById('filterBranch').value;
+            const fHub = document.getElementById('filterHub').value;
+            const fPort = document.getElementById('filterPort').value;
+            
+            let activePaths = pathsData.filter(p => {
+                // Ignore unknown locations completely
+                if (p.hubId.includes('XXXXXXX') || p.portId.includes('XXXXXXX')) return false;
+
+                if (fProd !== 'ALL' && p.productType !== fProd) return false;
+                if (fExp !== 'ALL' && p.exporterGroup !== fExp) return false;
+                if (fBra !== 'ALL' && p.branch !== fBra) return false;
+                if (fHub !== 'ALL' && p.hubId !== fHub) return false;
+                if (fPort !== 'ALL' && p.portName !== fPort) return false;
+                return true;
+            });
+
+            let aggregatedFlows = new Map();
+            const volByMun = {};
+
+            activePaths.forEach(path => {
+                const ibge = extractIBGE(path.hubId);
+                volByMun[ibge] = (volByMun[ibge] || 0) + path.volume;
+
+                // CHAVE NOVA: Apenas Hub (Origem) e Porto (Destino). O Exportador não divide mais as linhas.
+                let key = `${path.hubId}|${path.portId}`;
+                
+                if (!aggregatedFlows.has(key)) {
+                    aggregatedFlows.set(key, { 
+                        Origin_ID: path.hubId, 
+                        Destination_ID: path.portId, 
+                        Destination_Name: path.portName,
+                        Volume_Tons: 0 
+                    });
+                }
+                aggregatedFlows.get(key).Volume_Tons += path.volume;
+            });
+
+            const visibleFlows = Array.from(aggregatedFlows.values());
+            const volumes = Object.values(volByMun);
+            const maxVol = volumes.length > 0 ? Math.max(...volumes) : 1;
+
+            // Desenhar Choropleth (Municípios Hub)
+            Object.keys(municipalityShapes).forEach(ibge => {
+                const layer = municipalityShapes[ibge];
+                const vol = volByMun[ibge] || 0;
+                
+                if (vol > 0) {
+                    layer.setStyle({ fillColor: d3.interpolateGreens(vol / maxVol), fillOpacity: 0.8, weight: 0.5, color: '#fff' });
+                    layer.bindPopup(`<b>${ibgeNameMap[ibge] || 'IBGE: '+ibge}</b><br>Hub Volume: ${vol.toLocaleString(undefined, {maximumFractionDigits: 2})} t`);
+                } else {
+                    layer.setStyle({ fillColor: 'rgba(255,255,255,0.05)', fillOpacity: 0.1, weight: 0.2, color: '#444' });
+                    layer.unbindPopup();
+                }
+            });
+
+            let drawnPoints = new Set();
+            const maxSegmentVol = visibleFlows.length > 0 ? d3.max(visibleFlows, d => d.Volume_Tons) : 1;
+
+            // Desenhar Linhas Consolidadas e Pontos de Destino (Portos)
+            visibleFlows.forEach(d => {
+                const origCode = extractIBGE(d.Origin_ID);
+                const destCode = extractIBGE(d.Destination_ID);
+
+                // Marcador de Porto
+                if (!drawnPoints.has(d.Destination_ID) && geoIndex[destCode]) {
+                    const center = d3.geoCentroid(geoIndex[destCode]).reverse();
+                    L.circleMarker(center, {
+                        radius: 6, fillColor: '#e74c3c', color: '#fff', weight: 1, fillOpacity: 1
+                    }).addTo(pointLayer).bindPopup(`<b>PORT:</b> ${d.Destination_Name}`);
+                    drawnPoints.add(d.Destination_ID);
+                }
+
+                // Desenhar Única Linha Curva
+                if (geoIndex[origCode] && geoIndex[destCode]) {
+                    const startArr = d3.geoCentroid(geoIndex[origCode]).reverse();
+                    const endArr = d3.geoCentroid(geoIndex[destCode]).reverse();
+                    
+                    const pts = getBezierPoints(
+                        {lat: startArr[0], lng: startArr[1]}, 
+                        {lat: endArr[0], lng: endArr[1]}
+                    );
+                    
+                    const weight = Math.min(Math.max((d.Volume_Tons / maxSegmentVol) * 15, 1.5), 10);
+                    const lineColor = '#F9B624';
+
+                    const polyline = L.polyline(pts, { 
+                        color: lineColor, weight: weight, opacity: 0.6, smoothFactor: 1, interactive: true
+                    }).addTo(flowLayer);
+                    
+                    // Adicionar um popup na linha mostrando o volume total daquela rota
+                    polyline.bindTooltip(`Rota: ${ibgeNameMap[origCode] || origCode} → ${d.Destination_Name}<br>Volume: ${d.Volume_Tons.toLocaleString(undefined, {maximumFractionDigits: 2})} t`, {sticky: true});
+
+                    const arrowSize = 6 + (weight / 2.5);
+                    const arrowHeadSymbol = L.Symbol.arrowHead({
+                        pixelSize: arrowSize, polygon: true, pathOptions: { stroke: false, fillOpacity: 0.8, color: lineColor }
+                    });
+
+                    L.polylineDecorator(polyline, {
+                        patterns: [{ offset: '85%', repeat: 0, symbol: arrowHeadSymbol }]
+                    }).addTo(flowLayer);
+                }
+            });
+
+            document.getElementById('routeCount').innerText = visibleFlows.length;
+        }
+        
+        loadData();
+    </script>
+</body>
+</html>
